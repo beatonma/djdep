@@ -1,73 +1,122 @@
+"""Find and display dependencies between files in our project.
+Standard library imports and  3rd party library imports are ignored.
+
+TODO Handle relative imports like: `import .package.obj`"""
+
 import argparse
+import logging
 import os
 import re
 from typing import (
-    List,
     Dict,
+    Optional,
 )
+
+DIR_BLACKLIST = [
+    '__pycache__',
+    '.git',
+    '.idea',
+    'env',
+    'migrations',
+]
+
+IMPORT_PATTERN = re.compile(r'^(from ([.\w]+) )?import ([.\w]+).*')
+
+
+log = logging.getLogger(__name__)
 
 
 def _parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        'app_names',
-        nargs='+',
-        help='File paths for the apps you are interested in.'
-    )
-
     return parser.parse_args()
 
 
-def _read_requirements_txt() -> List[str]:
-    pattern = re.compile(r'^(\w+)([<>=]*).*?$')
-    with open('requirements.txt', 'r') as f:
-        packages = [
-            re.match(pattern, line).group(1) for line in
-            f.readlines()
-        ]
-    return packages
+def _traverse_dict(obj: Dict, callback):
+    pending_keys = []
+    for key, value in obj.items():
+        pending_keys.append(key)
+        if isinstance(value, dict):
+            _traverse_dict(value)
 
-
-def read_app_imports(appname: str, output_map: Dict):
-    for root, dirs, files in os.walk(appname):
-        print(root)
-
-        for f in files:
-            if os.path.splitext(f)[1] == '.py':
-                _read_file_imports(os.path.join(root, f), output_map)
-
-    return output_map
+    for key in pending_keys:
+        callback(obj, key)
 
 
 def _read_file_imports(file, dependency_map: Dict):
-    dotted_filepath = re.sub(r'[\\/]', r'.', file)
-    dotted_filepath = re.sub(r'\.\.', '', dotted_filepath)
-    dotted_filepath = re.sub(r'\.py$', '', dotted_filepath)
-    dependency_map[dotted_filepath] = []
+    """Add an entry in `dependency_map` using its dotted path as the key.
+    The entry value is a list of dotted paths representing everything
+    that was imported in that file.
+    """
+    dotted_filepath = _convert_path_filesystem_to_python(file)
 
-    pattern = re.compile(r'^(from ([.\w]+) )?import ([\w]+).*')
     with open(file, 'r') as f:
         for line in f.readlines():
-            match = re.match(pattern, line)
-            if match:
-                imported_from = match.group(2) or ''
-                if imported_from:
-                    imported_from = f'{imported_from}.'
-                imported = f'{imported_from}{match.group(3)}'
+            imported = _read_import_line(line, file)
+            if imported:
                 dependency_map[dotted_filepath].append(imported)
 
 
+def _read_import_line(line: str, file) -> Optional[str]:
+    match = re.match(IMPORT_PATTERN, line)
+    if match:
+        log.debug(match)
+        imported_from = match.group(2) or ''
+        if imported_from:
+            imported_from = f'{imported_from}.'
+        return f'{imported_from}{match.group(3)}'
+
+
+def _convert_path_filesystem_to_python(absolute_path, cwd=os.getcwd()):
+    dotted_path = os.path.relpath(absolute_path, cwd)
+    dotted_path = re.sub(r'[(\\\\)/]', r'.', dotted_path)
+    dotted_path = re.sub(r'\.py$', '', dotted_path)
+    return dotted_path
+
+
+def _read_imports(rootdir, dependency_map: Dict):
+    for cwd, dirs, files in os.walk(rootdir):
+        for d in dirs:
+            if d in DIR_BLACKLIST:
+                dirs.remove(d)
+                continue
+
+        if '__init__.py' not in files:
+            # Not a python package
+            continue
+
+        for f in files:
+            if os.path.splitext(f)[1] == '.py':
+                path = os.path.join(cwd, f)
+                _read_file_imports(path, dependency_map)
+
+
+def _remove_empty_imports(dependency_map):
+    def _del(obj, key):
+        if not obj[key]:
+            del obj[key]
+
+    _traverse_dict(dependency_map, _del)
+
+
+def _remove_external_imports(dependency_map):
+    """Trim any imports that are not defined in the project. We are not
+    interested in standard library packages or 3rd party libraries for our
+    purposes."""
+
+    internal_imports = dependency_map.keys()
+
+    for key, value in dependency_map.items():
+        dependency_map[key] = [x for x in value if x in internal_imports]
+
+
 if __name__ == '__main__':
-    args = _parse_args()
-
-    third_party = _read_requirements_txt()
-    print(f'packages: {third_party}')
-
     dependencies = {}
 
-    for app in args.app_names:
-        dependencies = read_app_imports(app, dependencies)
+    _read_imports(os.getcwd(), dependencies)
+    _remove_external_imports(dependencies)
+    _remove_empty_imports(dependencies)
 
     import json
-    print(json.dumps(dependencies, indent=2))
+
+    log.debug(json.dumps(dependencies, indent=2))
