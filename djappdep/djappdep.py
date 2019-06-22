@@ -1,9 +1,9 @@
 """Find and display dependencies between files in our project.
 Standard library imports and  3rd party library imports are ignored.
-
-TODO Handle relative imports like: `import .package.obj`"""
+"""
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -21,15 +21,55 @@ DIR_BLACKLIST = [
 ]
 
 IMPORT_PATTERN = re.compile(r'^(from ([.\w]+) )?import ([.\w]+).*')
+GRANULARITY_PATTERN = r'((\w+)\.?)'
 
 
 log = logging.getLogger(__name__)
+log.setLevel(logging.DEBUG)
 
 
 def _parse_args():
     parser = argparse.ArgumentParser()
 
-    return parser.parse_args()
+    parser.add_argument(
+        '--maxdepth',
+        '-d',
+        type=int,
+        default=1,
+        help='Dependency granularity. e.g:\n'
+             '1 -> app: [dependencies]\n'
+             '2 -> app.submodule: [dependencies]\n'
+             '3 -> app.submodule.file: [dependencies]'
+    )
+
+    parser.add_argument(
+        '-allow_internal',
+        action='store_true',
+        default=False,
+        help='If set, imports within an app/module will be displayed'
+    )
+
+    parser.add_argument(
+        '-all',
+        '-a',
+        action='store_true',
+        default=False,
+        help='Maximum granularity, equivalent to --maxdepth=1000'
+    )
+
+    parser.add_argument(
+        '-ignore_tests',
+        '-t',
+        action='store_true',
+        default=False,
+        help='If set, remove imports that only appear in test modules.'
+    )
+
+    args = parser.parse_args()
+    if args.all:
+        args.maxdepth = 1000
+
+    return args
 
 
 def _traverse_dict(obj: Dict, callback):
@@ -49,25 +89,36 @@ def _read_file_imports(file, dependency_map: Dict):
     that was imported in that file.
     """
     dotted_filepath = _convert_path_filesystem_to_python(file)
+    dependency_map[dotted_filepath] = []
 
     with open(file, 'r') as f:
         for line in f.readlines():
-            imported = _read_import_line(line, file)
+            imported = _read_import_line(line, dotted_filepath)
             if imported:
                 dependency_map[dotted_filepath].append(imported)
 
 
-def _read_import_line(line: str, file) -> Optional[str]:
+def _read_import_line(line: str, dotted_filepath: str) -> Optional[str]:
+    def local_to_abs(local):
+        return f'{dotted_filepath}{local}'
+
     match = re.match(IMPORT_PATTERN, line)
     if match:
         log.debug(match)
         imported_from = match.group(2) or ''
         if imported_from:
+            if imported_from[0] == r'.':
+                imported_from = local_to_abs(imported_from)
             imported_from = f'{imported_from}.'
-        return f'{imported_from}{match.group(3)}'
+
+        imported = match.group(3)
+        if imported[0] == r'.':
+            imported = local_to_abs(imported)
+        return f'{imported_from}{imported}'
 
 
 def _convert_path_filesystem_to_python(absolute_path, cwd=os.getcwd()):
+    """Convert Windows or *nix filepath to dotted.path."""
     dotted_path = os.path.relpath(absolute_path, cwd)
     dotted_path = re.sub(r'[(\\\\)/]', r'.', dotted_path)
     dotted_path = re.sub(r'\.py$', '', dotted_path)
@@ -110,13 +161,57 @@ def _remove_external_imports(dependency_map):
         dependency_map[key] = [x for x in value if x in internal_imports]
 
 
-if __name__ == '__main__':
+def _remove_tests(dependency_map: Dict):
+    removals = []
+    for key in dependency_map:
+        if re.match(r'.*(tests\.|_test|test_).*', key):
+            removals.append(key)
+
+    for key in removals:
+        del dependency_map[key]
+
+
+def _set_granularity(dependency_map: Dict, level: int):
+    outmap = {}
+    for key, value in dependency_map.items():
+        matches = re.findall(GRANULARITY_PATTERN, key)
+        granular_key = '.'.join([m[1] for m in matches][0:level])
+        if granular_key in outmap:
+            outmap[granular_key] += value
+        else:
+            outmap[granular_key] = value
+
+    for key, value in outmap.items():
+        outmap[key] = list(set(value))
+    dependency_map.clear()
+    dependency_map.update(**outmap)
+
+
+def _remove_internal_app_imports(dependency_map: Dict):
+    for key, value in dependency_map.items():
+        removals = []
+        for item in value:
+            if item.startswith(key):
+                removals.append(item)
+        for item in removals:
+            value.remove(item)
+
+
+def main():
+    args = _parse_args()
     dependencies = {}
 
     _read_imports(os.getcwd(), dependencies)
     _remove_external_imports(dependencies)
+    if args.ignore_tests:
+        _remove_tests(dependencies)
+    _set_granularity(dependencies, level=args.maxdepth)
+    if not args.allow_internal:
+        _remove_internal_app_imports(dependencies)
     _remove_empty_imports(dependencies)
 
-    import json
+    print(json.dumps(dependencies, indent=2))
 
-    log.debug(json.dumps(dependencies, indent=2))
+
+if __name__ == '__main__':
+    main()
