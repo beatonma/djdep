@@ -1,8 +1,9 @@
 from setuptools import setup
+from djappdep.djappdep import __version__
 
 setup(
     name='djdep',
-    version='0.1',
+    version=__version__,
     packages=['djappdep'],
     url='https://beatonma.org',
     license='',
