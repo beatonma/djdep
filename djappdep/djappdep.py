@@ -20,7 +20,7 @@ DIR_BLACKLIST = [
     'migrations',
 ]
 
-IMPORT_PATTERN = re.compile(r'^(from ([.\w]+) )?import ([.\w]+).*')
+IMPORT_PATTERN = re.compile(r'^(from ([.\w]+) )?import ([.*\w]+).*')
 GRANULARITY_PATTERN = r'((\w+)\.?)'
 
 
