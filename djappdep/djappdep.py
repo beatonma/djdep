@@ -25,7 +25,8 @@ GRANULARITY_PATTERN = r'((\w+)\.?)'
 
 
 log = logging.getLogger(__name__)
-log.setLevel(logging.DEBUG)
+log.addHandler(logging.StreamHandler())
+log.setLevel(logging.INFO)
 
 
 def _parse_args():
@@ -39,35 +40,39 @@ def _parse_args():
         help='Dependency granularity. e.g:\n'
              '1 -> app: [dependencies]\n'
              '2 -> app.submodule: [dependencies]\n'
-             '3 -> app.submodule.file: [dependencies]'
-    )
+             '3 -> app.submodule.file: [dependencies]')
 
     parser.add_argument(
         '-allow_internal',
         action='store_true',
         default=False,
-        help='If set, imports within an app/module will be displayed'
-    )
+        help='If set, imports within an app/module will be displayed')
 
     parser.add_argument(
         '-all',
         '-a',
         action='store_true',
         default=False,
-        help='Maximum granularity, equivalent to --maxdepth=1000'
-    )
+        help='Maximum granularity, equivalent to --maxdepth=1000')
 
     parser.add_argument(
         '-ignore_tests',
         '-t',
         action='store_true',
         default=False,
-        help='If set, remove imports that only appear in test modules.'
-    )
+        help='If set, remove imports that only appear in test modules.')
+
+    parser.add_argument(
+        '-debug',
+        action='store_true',
+        default=False,
+        help='Enable debug log output.')
 
     args = parser.parse_args()
     if args.all:
         args.maxdepth = 1000
+    if args.debug:
+        log.setLevel(logging.DEBUG)
 
     return args
 
@@ -104,7 +109,6 @@ def _read_import_line(line: str, dotted_filepath: str) -> Optional[str]:
 
     match = re.match(IMPORT_PATTERN, line)
     if match:
-        log.debug(match)
         imported_from = match.group(2) or ''
         if imported_from:
             if imported_from[0] == r'.':
@@ -114,7 +118,13 @@ def _read_import_line(line: str, dotted_filepath: str) -> Optional[str]:
         imported = match.group(3)
         if imported[0] == r'.':
             imported = local_to_abs(imported)
-        return f'{imported_from}{imported}'
+
+        result = f'{imported_from}{imported}'
+        log.debug(f'{dotted_filepath} -> {result}')
+        return result
+    else:
+        if line.startswith('import') or line.startswith('from'):
+            log.debug(f'MISSED IMPORT: {line}')
 
 
 def _convert_path_filesystem_to_python(absolute_path, cwd=os.getcwd()):
